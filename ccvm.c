@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
+
 
 // xxd -r -p tmp
 #define DEBUG
@@ -31,6 +33,8 @@ typedef struct body_info body_info_t;
 
 struct tasks {
 	int task_body;		// we need to know which body corresponds to each task
+	int min_pc;			// min/max pc values are needed to check if a task by..
+	int max_pc;			// ..mistake accesses another body
 
 	struct tasks *nxt;
 	struct tasks *prv;
@@ -50,8 +54,7 @@ struct tasks {
 // and pass them as arguments to functions
 char *globalMem;
 char *code;
-int cur;
-struct tasks *cur_addr;	// used to avoid a search in function list_move_to
+struct tasks *cur;		// used to avoid a search in function list_move_to
 						// holds the node address of the current running task
 
 struct tasks *rdy_root;	// root for ready task list
@@ -71,12 +74,13 @@ void print_node();
 // .bin related functions
 void read_bytes(int fd,	char *data, int bytes);
 void trace(char *str, int len);		//only for debugging
-void load_bin(int fd);
-
+int load_bin(int fd);
+void run_bin(int num_of_tasks);
 
 
 int main(int argc, char *argv[]) {
 	int fd_bin;
+	int num_of_tasks;
 
 	if (argc != 2) {
 		printf("Invalid number of arguments\nExiting..\n");
@@ -96,7 +100,8 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
-	load_bin(fd_bin);
+	num_of_tasks = load_bin(fd_bin);
+	run_bin(num_of_tasks);
 
 	if (close(fd_bin)) {
 		perror("close");
@@ -129,7 +134,7 @@ void list_init() {
 }
 
 
-// instert to ready(state) list and initialize node
+// insert to ready(state) list and initialize node
 void list_insert(int id, int task_body, int task_arg) {
 	struct tasks *curr;
 
@@ -143,15 +148,17 @@ void list_insert(int id, int task_body, int task_arg) {
 	curr->id = id;
 	curr->state = READY;
 	curr->task_body = task_body;
+	curr->min_pc = bd_info[task_body-1].start_of_code;
+	curr->max_pc = curr->min_pc + bd_info[task_body-1].code_size - 1;
 	curr->pc = bd_info[task_body-1].start_of_code;
 
-	curr->local_mem = (char *)malloc(bd_info[task_body].locals_size*sizeof(char));
+	curr->local_mem = (char *)malloc(bd_info[task_body-1].locals_size*sizeof(char));
 	if(curr->local_mem == NULL) {
 		printf("Memory allocation problems.\nExiting..\n");
 		exit(1);
 	}
 	// put task argument to last local memory segment
-	curr->local_mem[bd_info[task_body].locals_size-1] = task_arg;
+	curr->local_mem[bd_info[task_body-1].locals_size-1] = task_arg;
 
 	curr->sem = -1;
 	curr->waket = -1;
@@ -162,6 +169,7 @@ void list_insert(int id, int task_body, int task_arg) {
 	curr->prv->nxt = curr;
 
 	print_node(curr);
+	print_lists();
 }
 
 
@@ -193,7 +201,7 @@ int list_delete(struct tasks *node) {
 // called only when a task must go blocked or ready
 // move node with id from D_RDY/D_BLC to D_BLC/D_RDY(=dst)
 // if dst == D_BLC then node will be added at the end (before root)
-// if dst == D_RDY then node will be added before id of current running task(global cur_addr)
+// if dst == D_RDY then node will be added before id of current running task(global cur)
 int list_move_to(struct tasks *node, int dst) {
 	struct tasks *root1;	// root of the list initially holding the node
 	struct tasks *root2;	// root of the list where the node will be finally inserted
@@ -204,12 +212,12 @@ int list_move_to(struct tasks *node, int dst) {
 		root1 = blc_root;
 		root2 = rdy_root;
 		// in this case we want one task (node) to go from blocked to ready
-		// this cant be cur_addr because this is the one that called UP
-		if (node->id == cur_addr->id) {
+		// this cant be cur because this is the one that called UP
+		if (node->id == cur->id) {
 			printf("list_move_to:\nError: node and curr_addr are the same\n");
 			return(1);
 		}
-		curr2 = cur_addr->prv;
+		curr2 = cur->prv;
 	}
 	else if (dst == D_BLC) {
 		root1 = rdy_root;
@@ -257,6 +265,7 @@ struct tasks *list_locate_blocked(int addr) {
 }
 
 void print_lists() {
+#ifdef DEBUG
 	struct tasks *curr;
 
 	printf("NonBlocked:");
@@ -265,11 +274,12 @@ void print_lists() {
 	}
 	printf("\n");
 
-	printf("\nBlocked:");
+	printf("Blocked:");
 	for (curr=blc_root->nxt; (curr->id!=-1); curr=curr->nxt) {
 		printf(" %d->", curr->id);
 	}
 	printf("\n");
+#endif
 }
 
 void print_node(struct tasks *node) {
@@ -280,8 +290,10 @@ void print_node(struct tasks *node) {
 	printf("PC: \t%d\n", node->pc);
 	printf("SEM: \t%d\n", node->sem);
 	printf("WAKET: \t%d\n", node->waket);
-	printf("ARG: \t%d\n", node->local_mem[bd_info[node->task_body].locals_size-1]);
-	printf("TSKBOD: \t%d\n", node->task_body);
+	printf("ARG: \t%d\n", node->local_mem[bd_info[node->task_body-1].locals_size-1]);
+	printf("TSKBD: \t%d\n", node->task_body);
+	printf("MINPC: \t%d\n", node->min_pc);
+	printf("MAXPC: \t%d\n", node->max_pc);
 	printf("\n");
 #endif
 }
@@ -315,7 +327,7 @@ void read_bytes(int fd, char *data, int bytes) {
 
 
 // reads the bin file
-void load_bin(int fd) {
+int load_bin(int fd) {
 	char magic_beg[5] = { 0xde, 0xad, 0xbe, 0xaf, 0x00};
 	char magic_bod[5] = { 0xde, 0xad, 0xc0, 0xde, 0x00};
 	char magic_tsk[5] = { 0xde, 0xad, 0xba, 0xbe, 0x00};
@@ -338,7 +350,7 @@ void load_bin(int fd) {
 
 	printf("Loading file..\n");
 
-	printf("***\nHeader Section: \n");
+	printf("\nHeader Section: \n");
 
 	// read MagicBeg
 	/*printf("offset = %d\n", (int)lseek(fd, (off_t)0, SEEK_CUR));*/
@@ -384,16 +396,13 @@ void load_bin(int fd) {
 	// read number of tasks
 	read_bytes(fd, data, 1);
 	num_of_tasks = (unsigned char)data[0];
-	printf("\tNumOfTasks: %d\n", num_of_tasks);
-	printf("***\n\n");
+	printf("\tNumOfTasks: %d\n\n", num_of_tasks);
 
 	// initialize global memory
-	printf("***\nGlobalInit Section: \n");
+	printf("GlobalInit Section: \n");
 	read_bytes(fd, (char *)globalMem, global_size);
-	printf("Done.\n(%d bytes)\n", global_size);
+	printf("(Stored %d bytes)\n\n", global_size);
 
-
-	printf("***\n\n");
 
 
 	code = (char *)malloc(tot_code_size*sizeof(char));
@@ -405,7 +414,7 @@ void load_bin(int fd) {
 	// store code and info from body sections
 	for(i=0; i<num_of_bodies; i++) {
 
-		printf("***\nBody(%d) Section: \n", (i+1));
+		printf("Body(%d) Section: \n", (i+1));
 
 		//read MagicBody
 		read_bytes(fd, data, 4);
@@ -435,7 +444,7 @@ void load_bin(int fd) {
 		printf("code_size = %d\n", bd_info[i].code_size);
 		printf("start_of_code = %d\n", bd_info[i].start_of_code);
 		trace((char *)code, code_index);
-		printf("***\n\n");
+		printf("\n");
 	}
 	/*printf("(Total bodies: %d )\n", i);*/
 
@@ -443,7 +452,7 @@ void load_bin(int fd) {
 
 	for(i=0; i<num_of_tasks; i++) {
 
-		printf("***\nTask(%d) Section: \n", (i+1));
+		printf("Task(%d) Section: \n", (i+1));
 
 		// read MagicTask
 		read_bytes(fd, data, 4);
@@ -464,14 +473,208 @@ void load_bin(int fd) {
 		printf("\tTaskArg: %d\n", task_arg);
 
 		list_insert(i, task_body, task_arg);
-		printf("***\n\n");
-		print_lists();
-
+		printf("\n");
 	}
 
 	// read MagicEnd
+	printf("Footer Section: \n");
 	read_bytes(fd, data, 4);
 	data[4] = '\0';
 	if (!strcmp(data, magic_end)) { printf("\tMagicEnd: MATCHES\n"); }
 	else { printf("\tMagicEnd: MASSMATCH\nTerminating..\n"); exit(1);}
+
+	return(num_of_tasks);
+}
+
+void run_bin(int num_of_tasks) {
+	int tasks_stopped = 0;
+	int i;
+	int inum;
+	char ibyte1;
+	char ibyte2;
+	char ibyte3;
+	struct tasks *blc_node;
+	struct tasks *cur_copy;
+
+	cur_copy = NULL;
+	cur=rdy_root;
+	srand(time(NULL));
+
+	while(1) {
+
+		cur=cur->nxt;
+
+		if (cur_copy != NULL) {
+			if (cur_copy->state == STOPPED) {list_delete(cur_copy);}
+			if (cur_copy->state == BLOCKED) {list_move_to(cur_copy, D_BLC);}
+			cur_copy = NULL;
+		}
+
+		if (cur->id==-1) {cur=cur->nxt;}
+
+		if ((tasks_stopped!=num_of_tasks)&&(cur==cur->nxt)) {
+			printf("Error: DEADLOCK\n");
+			exit(1);
+		}
+
+		if ((cur->state==SLEEPING)&&(time(NULL) < cur->waket)) { continue;}
+		if ((cur->state==SLEEPING)&&(time(NULL) >= cur->waket)) {cur->waket=-1;}
+
+		i = 0;
+		inum = rand()%2+1;
+		while (i<inum) {
+			ibyte1 = code[cur->pc];
+			ibyte2 = code[cur->pc+1];
+			ibyte3 = code[cur->pc+2];
+
+			switch (ibyte1) {
+				case 0x01: {   // LLOAD
+							   cur->reg[ibyte2] = cur->local_mem[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x02: {   // LLOADi
+							   cur->reg[ibyte2] = cur->local_mem[ibyte3 + cur->reg[0]];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x03: {   // GLOAD
+							   cur->reg[ibyte2] = globalMem[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x04: {   // GLOADi
+							   cur->reg[ibyte2] = globalMem[ibyte3 + cur->reg[0]];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x05: {   // LSTORE
+							   cur->local_mem[ibyte3] = cur->reg[ibyte2];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x06: {   // LSTOREi
+							   cur->local_mem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x07: {   // GSTORE
+							   globalMem[ibyte3] = cur->reg[ibyte2];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x08: {   // GSTOREi
+							   globalMem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x09: {   // SET
+							   cur->reg[ibyte2] = ibyte3;
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x0a: {   // ADD
+							   cur->reg[ibyte2] = cur->reg[ibyte2] + cur->reg[ibyte3];
+							   cur->pc += 3;
+						   }
+				case 0x0b: {   // SUB
+							   cur->reg[ibyte2] = cur->reg[ibyte2] - cur->reg[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x0c: {   // MUL
+							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x0d: {   // DIV
+							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x0e: {   // MOD
+							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x0f: {   // BRGZ
+							   if (ibyte2 > 0) { cur->pc+=3*ibyte3; }
+							   else { cur->pc+=3; }
+							   break;
+						   }
+				case 0x10: {   // BRGEZ
+							   if (ibyte2 >= 0) { cur->pc+=3*ibyte3; }
+							   else { cur->pc+=3; }
+							   break;
+						   }
+				case 0x11: {   // BRLZ
+							   if (ibyte2 < 0) { cur->pc+=3*ibyte3; }
+							   else { cur->pc+=3; }
+							   break;
+						   }
+				case 0x12: {   // BRLEZ
+							   if (ibyte2 <= 0) { cur->pc+=3*ibyte3; }
+							   else { cur->pc+=3; }
+							   break;
+						   }
+				case 0x13: {   // BREZ
+							   if (ibyte2 == 0) { cur->pc+=3*ibyte3; }
+							   else { cur->pc+=3; }
+							   break;
+						   }
+				case 0x14: {   // BRA
+							   cur->pc+=3*ibyte3;
+							   break;
+						   }
+				case 0x15: {   // DOWN
+							   globalMem[ibyte3]--;
+							   if (globalMem[ibyte3] < 0) {
+								   cur->state = BLOCKED;
+								   cur->sem = ibyte3;
+								   cur_copy = cur;
+							   }
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x16: {   // UP
+							   globalMem[ibyte3]++;
+							   if (globalMem[ibyte3] <= 0) {
+								   blc_node = list_locate_blocked(ibyte3);
+								   blc_node->state = READY;
+								   blc_node->sem = -1;
+								   list_move_to(blc_node, D_RDY);
+							   }
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x17: {   // YIELD
+							   cur->pc +=3;
+							   break;
+						   }
+				case 0x18: {   // SLEEP
+							   cur->state = SLEEPING;
+							   cur->waket = time(NULL) + ibyte2;
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x19: {   // PRINT
+							   printf("%d: %s\n", cur->id, &globalMem[ibyte3]);
+							   cur->pc += 3;
+							   break;
+						   }
+				case 0x1A: {   // EXIT
+							   cur->state = STOPPED;
+							   cur_copy = cur;
+							   tasks_stopped++;
+							   break;
+						   }
+				default: {
+							 printf("Error: Unknown instruction id\n");
+							 exit(1);
+						 }
+			}
+			if ((ibyte1 == 0x17) || (cur->state == STOPPED) || (cur->state == BLOCKED)) {break;}
+			i++;
+		}
+	}
 }
