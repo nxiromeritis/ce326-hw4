@@ -58,12 +58,17 @@ struct tasks *rdy_root;	// root for ready task list
 struct tasks *blc_root;	// root for blocked task list
 body_info_t *bd_info;
 
+// list functions
 void list_init();
-void list_insert(int id, int task_body, int task_arg, int id2);		//insert after id2
-int  list_remove(struct tasks *node);				// remove id from dst
+void list_insert(int id, int task_body, int task_arg);		//insert after root
+int  list_delete(struct tasks *node);				// remove id from dst
 int  list_move_to(struct tasks *node, int dst);		// dst = D_RDY/D_BLC = destination
 struct tasks *list_locate_blocked(int addr);		// locate blocked task at an addr
+void print_lists();
 
+void print_node();
+
+// .bin related functions
 void read_bytes(int fd,	char *data, int bytes);
 void trace(char *str, int len);		//only for debugging
 void load_bin(int fd);
@@ -120,61 +125,72 @@ void list_init() {
 	}
 	blc_root->nxt = blc_root;
 	blc_root->prv = blc_root;
+	blc_root->id = -1;
 }
 
 
-// insert a new node to ready_list and initialise some if its fields
-void list_insert(int id, int task_body, int task_arg, int id2) {
+// instert to ready(state) list and initialize node
+void list_insert(int id, int task_body, int task_arg) {
 	struct tasks *curr;
-	struct tasks *curr2;
 
 	curr = (struct tasks *)malloc(sizeof(struct tasks));
 	if (curr == NULL) {
 		printf("Memory allocation problems.\nExiting..\n");
 		exit(1);
 	}
+
+	// initialize node fields
 	curr->id = id;
 	curr->state = READY;
 	curr->task_body = task_body;
-	curr->pc = bd_info[task_body].start_of_code;
+	curr->pc = bd_info[task_body-1].start_of_code;
 
 	curr->local_mem = (char *)malloc(bd_info[task_body].locals_size*sizeof(char));
 	if(curr->local_mem == NULL) {
 		printf("Memory allocation problems.\nExiting..\n");
 		exit(1);
 	}
+	// put task argument to last local memory segment
 	curr->local_mem[bd_info[task_body].locals_size-1] = task_arg;
 
-	// stop if node with id2 is found or root is reached (id == -1)
-	for(curr2=rdy_root->nxt; (curr2->id!=id2)&&(curr2->id!=-1); curr2=curr2->nxt);
+	curr->sem = -1;
+	curr->waket = -1;
 
-	curr->nxt = curr2->nxt;
-	curr->prv = curr2;
+	curr->nxt = rdy_root->nxt;
+	curr->prv = rdy_root;
 	curr->nxt->prv = curr;
 	curr->prv->nxt = curr;
 
+	print_node(curr);
 }
 
+
+
 // we can delete a node only if it belongs to rdy_list
-int list_remove(struct tasks *node) {
+int list_delete(struct tasks *node) {
 	struct tasks *curr;
 
-	// id's are unique. check if node exists in list
+	// id's are unique. check if node exists in rdy_list
 	for(curr=rdy_root->nxt; (curr->id != node->id)&&(curr->id != -1); curr=curr->nxt);
 	if (curr->id == -1) {
 		printf("list_remove:\nError: Node does not exist in list or has root id\n");
 		return(1);
 	}
 
+	if (curr->state != STOPPED) {
+		printf("list_delete: Task terminated unexpectedly (state != STOPPED)..\n");
+	}
+
 	node->nxt->prv = node->prv;
 	node->prv->nxt = node->nxt;
+	free(node->local_mem);
 	free(node);
 
 	return(0);
 }
 
 
-// called only when a task must go blocked or unblocked
+// called only when a task must go blocked or ready
 // move node with id from D_RDY/D_BLC to D_BLC/D_RDY(=dst)
 // if dst == D_BLC then node will be added at the end (before root)
 // if dst == D_RDY then node will be added before id of current running task(global cur_addr)
@@ -187,6 +203,8 @@ int list_move_to(struct tasks *node, int dst) {
 	if (dst == D_RDY) {
 		root1 = blc_root;
 		root2 = rdy_root;
+		// in this case we want one task (node) to go from blocked to ready
+		// this cant be cur_addr because this is the one that called UP
 		if (node->id == cur_addr->id) {
 			printf("list_move_to:\nError: node and curr_addr are the same\n");
 			return(1);
@@ -220,9 +238,9 @@ int list_move_to(struct tasks *node, int dst) {
 	node->nxt->prv = node;
 	node->prv->nxt = node;
 
-
 	return(0);
 }
+
 
 // called only when task must be unblocked from a semaphore
 // searches list with blocked tasks and returns the one which is blocked at given addr
@@ -238,6 +256,35 @@ struct tasks *list_locate_blocked(int addr) {
 	return(curr);
 }
 
+void print_lists() {
+	struct tasks *curr;
+
+	printf("NonBlocked:");
+	for (curr=rdy_root->nxt; (curr->id!=-1); curr=curr->nxt){
+		printf(" %d->", curr->id);
+	}
+	printf("\n");
+
+	printf("\nBlocked:");
+	for (curr=blc_root->nxt; (curr->id!=-1); curr=curr->nxt) {
+		printf(" %d->", curr->id);
+	}
+	printf("\n");
+}
+
+void print_node(struct tasks *node) {
+#ifdef DEBUG
+	printf("\nNew Task:\n");
+	printf("ID: \t%d\n", node->id);
+	printf("STATE: \t%d\n", node->state);
+	printf("PC: \t%d\n", node->pc);
+	printf("SEM: \t%d\n", node->sem);
+	printf("WAKET: \t%d\n", node->waket);
+	printf("ARG: \t%d\n", node->local_mem[bd_info[node->task_body].locals_size-1]);
+	printf("TSKBOD: \t%d\n", node->task_body);
+	printf("\n");
+#endif
+}
 
 // used only for debugging (displaying .bin contents)
 void trace(char *str, int len) {
@@ -308,7 +355,7 @@ void load_bin(int fd) {
 	printf("\tGlobalSize: %d\n", global_size);
 
 	// allocate memory for global memory
-	globalMem = (char *)malloc(global_size*sizeof(char)+1);
+	globalMem = (char *)malloc(global_size*sizeof(char));
 	if (globalMem == NULL) {
 		printf("Memory allocation problems.\nExiting..\n");
 		exit(1);
@@ -376,13 +423,13 @@ void load_bin(int fd) {
 		code_size = (unsigned char)data[0];
 		printf("\tCodeSize: %d\n", code_size);
 
-
-		// append variable "code" with new body's code
+		// store usefull information for later
 		bd_info[i].locals_size = locals_size;
 		bd_info[i].code_size = code_size;
 		bd_info[i].start_of_code = code_index;
 		read_bytes(fd, (char *)&code[code_index], code_size);
 
+		// append variable "code" with new body's code
 		code_index += code_size;
 		printf("---\nlocals_size = %d\n", bd_info[i].locals_size);
 		printf("code_size = %d\n", bd_info[i].code_size);
@@ -392,6 +439,7 @@ void load_bin(int fd) {
 	}
 	/*printf("(Total bodies: %d )\n", i);*/
 
+	list_init();
 
 	for(i=0; i<num_of_tasks; i++) {
 
@@ -415,7 +463,15 @@ void load_bin(int fd) {
 		task_arg = (unsigned char)data[0];
 		printf("\tTaskArg: %d\n", task_arg);
 
+		list_insert(i, task_body, task_arg);
 		printf("***\n\n");
+		print_lists();
 
 	}
+
+	// read MagicEnd
+	read_bytes(fd, data, 4);
+	data[4] = '\0';
+	if (!strcmp(data, magic_end)) { printf("\tMagicEnd: MATCHES\n"); }
+	else { printf("\tMagicEnd: MASSMATCH\nTerminating..\n"); exit(1);}
 }
