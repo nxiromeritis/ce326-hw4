@@ -11,7 +11,7 @@
 
 
 // xxd -r -p tmp
-#define DEBUG
+#define DEBUG2
 
 #define L_ROOT -4
 #define L_END -3
@@ -42,7 +42,7 @@ struct tasks {
 	//local task state variables
 	int id;
 	int state;
-	int reg[16];
+	char reg[16];
 	int pc;
 	int sem;
 	int waket;
@@ -81,6 +81,7 @@ void run_bin(int num_of_tasks);
 int main(int argc, char *argv[]) {
 	int fd_bin;
 	int num_of_tasks;
+	int i;
 
 	if (argc != 2) {
 		printf("Invalid number of arguments\nExiting..\n");
@@ -101,6 +102,10 @@ int main(int argc, char *argv[]) {
 	}
 
 	num_of_tasks = load_bin(fd_bin);
+
+	printf("Paused..\n");
+	scanf("%d", &i);
+
 	run_bin(num_of_tasks);
 
 	if (close(fd_bin)) {
@@ -335,7 +340,7 @@ int load_bin(int fd) {
 
 	char data[5];
 	int i;
-	int code_index;		// the point from where we should continue writing data to 'code'
+	unsigned int code_index;	// the point from where we should continue writing data to 'code'
 
 	// we could avoid having that many variables but it is prefered that way
 	// for better code understanding
@@ -490,11 +495,13 @@ void run_bin(int num_of_tasks) {
 	int tasks_stopped = 0;
 	int i;
 	int inum;
-	char ibyte1;
-	char ibyte2;
-	char ibyte3;
+	unsigned char ibyte1;
+	unsigned char ibyte2;
+	unsigned char ibyte3;
 	struct tasks *blc_node;
 	struct tasks *cur_copy;
+
+	printf("\nStart of execution:\n");
 
 	cur_copy = NULL;
 	cur=rdy_root;
@@ -504,6 +511,13 @@ void run_bin(int num_of_tasks) {
 
 		cur=cur->nxt;
 
+#ifdef DEBUG
+		print_lists();
+		printf("dbg: switch to id: %d\n", cur->id);
+		/*printf("stopped(%d) vs numoftasks(%d)\n", tasks_stopped, num_of_tasks);*/
+#endif
+
+
 		if (cur_copy != NULL) {
 			if (cur_copy->state == STOPPED) {list_delete(cur_copy);}
 			if (cur_copy->state == BLOCKED) {list_move_to(cur_copy, D_BLC);}
@@ -512,9 +526,15 @@ void run_bin(int num_of_tasks) {
 
 		if (cur->id==-1) {cur=cur->nxt;}
 
-		if ((tasks_stopped!=num_of_tasks)&&(cur==cur->nxt)) {
-			printf("Error: DEADLOCK\n");
-			exit(1);
+		if (cur==cur->nxt) {
+			if (tasks_stopped!=num_of_tasks) {
+				printf("Error: DEADLOCK\n");
+				exit(1);
+			}
+			else {
+				printf("All tasks STOPPED (successfuly).\nEnd of program.\n");
+				return;
+			}
 		}
 
 		if ((cur->state==SLEEPING)&&(time(NULL) < cur->waket)) { continue;}
@@ -527,6 +547,11 @@ void run_bin(int num_of_tasks) {
 			ibyte2 = code[cur->pc+1];
 			ibyte3 = code[cur->pc+2];
 
+#ifdef DEBUG
+			printf("dbg%d: %02x %02x %02x (pc:%d)\n\n",cur->id,ibyte1&0xff,ibyte2&0xff,ibyte3&0xff, cur->pc/3);
+#endif
+
+			/*sleep(2);*/
 			switch (ibyte1) {
 				case 0x01: {   // LLOAD
 							   cur->reg[ibyte2] = cur->local_mem[ibyte3];
@@ -560,6 +585,7 @@ void run_bin(int num_of_tasks) {
 						   }
 				case 0x07: {   // GSTORE
 							   globalMem[ibyte3] = cur->reg[ibyte2];
+							   /*if (ibyte2 == 7){printf("%d\n", (int)globalMem[ibyte3]&0xff);}*/
 							   cur->pc += 3;
 							   break;
 						   }
@@ -569,13 +595,14 @@ void run_bin(int num_of_tasks) {
 							   break;
 						   }
 				case 0x09: {   // SET
-							   cur->reg[ibyte2] = ibyte3;
+							   cur->reg[ibyte2] = (signed char)ibyte3;
 							   cur->pc += 3;
 							   break;
 						   }
 				case 0x0a: {   // ADD
 							   cur->reg[ibyte2] = cur->reg[ibyte2] + cur->reg[ibyte3];
 							   cur->pc += 3;
+							   break;
 						   }
 				case 0x0b: {   // SUB
 							   cur->reg[ibyte2] = cur->reg[ibyte2] - cur->reg[ibyte3];
@@ -588,42 +615,42 @@ void run_bin(int num_of_tasks) {
 							   break;
 						   }
 				case 0x0d: {   // DIV
-							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+							   cur->reg[ibyte2] = cur->reg[ibyte2] / cur->reg[ibyte3];
 							   cur->pc += 3;
 							   break;
 						   }
 				case 0x0e: {   // MOD
-							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+							   cur->reg[ibyte2] = cur->reg[ibyte2] % cur->reg[ibyte3];
 							   cur->pc += 3;
 							   break;
 						   }
 				case 0x0f: {   // BRGZ
-							   if (ibyte2 > 0) { cur->pc+=3*ibyte3; }
+							   if (cur->reg[ibyte2] > 0) { cur->pc+=3*(signed char)ibyte3; }
 							   else { cur->pc+=3; }
 							   break;
 						   }
 				case 0x10: {   // BRGEZ
-							   if (ibyte2 >= 0) { cur->pc+=3*ibyte3; }
+							   if (cur->reg[ibyte2] >= 0) { cur->pc+=3*(signed char)ibyte3; }
 							   else { cur->pc+=3; }
 							   break;
 						   }
 				case 0x11: {   // BRLZ
-							   if (ibyte2 < 0) { cur->pc+=3*ibyte3; }
+							   if (cur->reg[ibyte2] < 0) { cur->pc+=3*(signed char)ibyte3; }
 							   else { cur->pc+=3; }
 							   break;
 						   }
 				case 0x12: {   // BRLEZ
-							   if (ibyte2 <= 0) { cur->pc+=3*ibyte3; }
+							   if (cur->reg[ibyte2] <= 0) { cur->pc+=3*(signed char)ibyte3; }
 							   else { cur->pc+=3; }
 							   break;
 						   }
 				case 0x13: {   // BREZ
-							   if (ibyte2 == 0) { cur->pc+=3*ibyte3; }
+							   if (cur->reg[ibyte2] == 0) { cur->pc+=3*(signed char)ibyte3; }
 							   else { cur->pc+=3; }
 							   break;
 						   }
 				case 0x14: {   // BRA
-							   cur->pc+=3*ibyte3;
+							   cur->pc+=3*(signed char)ibyte3;
 							   break;
 						   }
 				case 0x15: {   // DOWN
@@ -653,7 +680,7 @@ void run_bin(int num_of_tasks) {
 						   }
 				case 0x18: {   // SLEEP
 							   cur->state = SLEEPING;
-							   cur->waket = time(NULL) + ibyte2;
+							   cur->waket = time(NULL) + cur->reg[ibyte2];
 							   cur->pc += 3;
 							   break;
 						   }
