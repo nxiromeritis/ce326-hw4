@@ -11,7 +11,7 @@
 
 
 // xxd -r -p tmp
-#define DEBUG2
+#define DEBUG2			//by changing the DEBUG to DEBUG2 we have the same result as putting it into comments 
 
 #define L_ROOT -4
 #define L_END -3
