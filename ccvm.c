@@ -11,7 +11,7 @@
 
 
 // xxd -r -p tmp
-#define DEBUG
+#define DEBUG2
 
 #define L_ROOT -4
 #define L_END -3
@@ -65,11 +65,16 @@ body_info_t *bd_info;
 
 //
 struct tasks ***tasks_of_cores;
+int number_of_tasks[CORES];
+int number_of_cores;
+int number_of_blocked_tasks;
+int finished_cores;
+pthread_mutex_t cs_mtx;
 
 // list functions
 void list_init();
 void list_insert(int id, int task_body, int task_arg, int core, int n);		//insert after root
-int  list_delete(struct tasks *node);				// remove id from dst
+int  list_delete(struct tasks *node, int core, int n);				// remove id from dst
 int  list_move_to(struct tasks *node, int dst);		// dst = D_RDY/D_BLC = destination
 struct tasks *list_locate_blocked(int addr);		// locate blocked task at an addr
 void print_lists();
@@ -80,7 +85,7 @@ void print_node();
 void read_bytes(int fd,	char *data, int bytes);
 void trace(char *str, int len);		//only for debugging
 int load_bin(int fd);
-void run_bin(int num_of_tasks);
+void *run_core(void *arg);
 
 void prepare_cores (int tasks);
 
@@ -88,6 +93,8 @@ int main(int argc, char *argv[]) {
 	int fd_bin;
 	int num_of_tasks;
 	int i;
+	int C[CORES];
+	pthread_t thread;
 
 	if (argc != 2) {
 		printf("Invalid number of arguments\nExiting..\n");
@@ -109,10 +116,36 @@ int main(int argc, char *argv[]) {
 
 	num_of_tasks = load_bin(fd_bin);
 
+	number_of_blocked_tasks = 0;
+
+	finished_cores = 0;
+
 	printf("Paused..\n");
 	scanf("%d", &i);
 
-	run_bin(num_of_tasks);
+	if (pthread_mutex_init(&cs_mtx, NULL)) {
+		perror("pthread_mutex_init");
+		exit(1);
+	}
+
+	for (i = 0; i < number_of_cores; i++){
+		C[i] = i;
+		if (pthread_create(&thread, NULL, run_core, &C[i])) {
+			perror("pthread_create");
+			exit(1);
+		}
+	}
+
+	while (1){
+		if (num_of_tasks == number_of_blocked_tasks){
+			printf("\nError:All tasks blocked!\n");
+			exit(1);
+		}
+		if (finished_cores == number_of_cores){
+			printf("All tasks STOPPED (successfuly).\nEnd of program.\n");
+			break;
+		}
+	}
 
 	if (close(fd_bin)) {
 		perror("close");
@@ -157,7 +190,7 @@ void list_insert(int id, int task_body, int task_arg, int core, int n) {
 	
 	//
 	tasks_of_cores[core][n] = curr;
-	
+	number_of_tasks[core]++;
 	
 	// initialize node fields
 	curr->id = id;
@@ -190,7 +223,7 @@ void list_insert(int id, int task_body, int task_arg, int core, int n) {
 
 
 // we can delete a node only if it belongs to rdy_list
-int list_delete(struct tasks *node) {
+int list_delete(struct tasks *node, int core, int n) {
 	struct tasks *curr;
 
 	// id's are unique. check if node exists in rdy_list
@@ -208,6 +241,8 @@ int list_delete(struct tasks *node) {
 	node->prv->nxt = node->nxt;
 	free(node->local_mem);
 	free(node);
+
+	tasks_of_cores[core][n] = NULL;
 
 	return(0);
 }
@@ -233,11 +268,13 @@ int list_move_to(struct tasks *node, int dst) {
 			return(1);
 		}
 		curr2 = cur->prv;
+		number_of_blocked_tasks--;
 	}
 	else if (dst == D_BLC) {
 		root1 = rdy_root;
 		root2 = blc_root;
 		curr2 = root2->prv;
+		number_of_blocked_tasks++;
 	}
 	else {
 		printf("list_move_to:\nError: Unknown list reference (dst).\n");
@@ -503,9 +540,11 @@ int load_bin(int fd) {
 	return(num_of_tasks);
 }
 
-void run_bin(int num_of_tasks) {
+void *run_core(void *arg) {
+	int core = *((int *)arg);
+	int num_of_tasks = number_of_tasks[core];
 	int tasks_stopped = 0;
-	int i;
+	int i, j;
 	int inum;
 	unsigned char ibyte1;
 	unsigned char ibyte2;
@@ -513,207 +552,256 @@ void run_bin(int num_of_tasks) {
 	struct tasks *blc_node;
 	struct tasks *cur_copy;
 
-	printf("\nStart of execution:\n");
+	printf("\nCore(%d): Start of execution:\n", core);
 
 	cur_copy = NULL;
 	cur=rdy_root;
 	srand(time(NULL));
 
 	while(1) {
+		for (j = 0; j < num_of_tasks; j++){
 
-		cur=cur->nxt;
+			cur=tasks_of_cores[core][j];
 
-#ifdef DEBUG
-		print_lists();
-		printf("dbg: switch to id: %d\n", cur->id);
-		/*printf("stopped(%d) vs numoftasks(%d)\n", tasks_stopped, num_of_tasks);*/
-#endif
-
-
-		if (cur_copy != NULL) {
-			if (cur_copy->state == STOPPED) {list_delete(cur_copy);}
-			if (cur_copy->state == BLOCKED) {list_move_to(cur_copy, D_BLC);}
-			cur_copy = NULL;
-		}
-
-		if (cur->id==-1) {cur=cur->nxt;}
-
-		if (cur==cur->nxt) {
-			if (tasks_stopped!=num_of_tasks) {
-				printf("Error: DEADLOCK\n");
-				exit(1);
+			if (cur == NULL){
+				tasks_stopped++;
+				if (tasks_stopped == num_of_tasks){
+					printf("Core(%d): All tasks STOPPED (successfuly).\n", core);
+					finished_cores++;
+					return (NULL);
+				}
+				continue;
 			}
-			else {
-				printf("All tasks STOPPED (successfuly).\nEnd of program.\n");
-				return;
+			
+	#ifdef DEBUG
+			print_lists();
+			printf("->Core(%d):\tdbg: switch to id: %d\n", core, cur->id);
+			/*printf("stopped(%d) vs numoftasks(%d)\n", tasks_stopped, num_of_tasks);*/
+	#endif
+
+
+			if (cur_copy != NULL) {
+				if (cur_copy->state == STOPPED) {list_delete(cur_copy, core, j);}
+				if (cur_copy->state == BLOCKED) {list_move_to(cur_copy, D_BLC);}
+				cur_copy = NULL;
 			}
-		}
 
-		if ((cur->state==SLEEPING)&&(time(NULL) < cur->waket)) { continue;}
-		if ((cur->state==SLEEPING)&&(time(NULL) >= cur->waket)) {cur->waket=-1;}
-
-		i = 0;
-		inum = rand()%2+1;
-		while (i<inum) {
-			ibyte1 = code[cur->pc];
-			ibyte2 = code[cur->pc+1];
-			ibyte3 = code[cur->pc+2];
-
-#ifdef DEBUG
-			printf("dbg%d: %02x %02x %02x (pc:%d)\n\n",cur->id,ibyte1&0xff,ibyte2&0xff,ibyte3&0xff, cur->pc/3);
-#endif
-
-			/*sleep(2);*/
-			switch (ibyte1) {
-				case 0x01: {   // LLOAD
-							   cur->reg[ibyte2] = cur->local_mem[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x02: {   // LLOADi
-							   cur->reg[ibyte2] = cur->local_mem[ibyte3 + cur->reg[0]];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x03: {   // GLOAD
-							   cur->reg[ibyte2] = globalMem[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x04: {   // GLOADi
-							   cur->reg[ibyte2] = globalMem[ibyte3 + cur->reg[0]];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x05: {   // LSTORE
-							   cur->local_mem[ibyte3] = cur->reg[ibyte2];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x06: {   // LSTOREi
-							   cur->local_mem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x07: {   // GSTORE
-							   globalMem[ibyte3] = cur->reg[ibyte2];
-							   /*if (ibyte2 == 7){printf("%d\n", (int)globalMem[ibyte3]&0xff);}*/
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x08: {   // GSTOREi
-							   globalMem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x09: {   // SET
-							   cur->reg[ibyte2] = (signed char)ibyte3;
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0a: {   // ADD
-							   cur->reg[ibyte2] = cur->reg[ibyte2] + cur->reg[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0b: {   // SUB
-							   cur->reg[ibyte2] = cur->reg[ibyte2] - cur->reg[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0c: {   // MUL
-							   cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0d: {   // DIV
-							   cur->reg[ibyte2] = cur->reg[ibyte2] / cur->reg[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0e: {   // MOD
-							   cur->reg[ibyte2] = cur->reg[ibyte2] % cur->reg[ibyte3];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x0f: {   // BRGZ
-							   if (cur->reg[ibyte2] > 0) { cur->pc+=3*(signed char)ibyte3; }
-							   else { cur->pc+=3; }
-							   break;
-						   }
-				case 0x10: {   // BRGEZ
-							   if (cur->reg[ibyte2] >= 0) { cur->pc+=3*(signed char)ibyte3; }
-							   else { cur->pc+=3; }
-							   break;
-						   }
-				case 0x11: {   // BRLZ
-							   if (cur->reg[ibyte2] < 0) { cur->pc+=3*(signed char)ibyte3; }
-							   else { cur->pc+=3; }
-							   break;
-						   }
-				case 0x12: {   // BRLEZ
-							   if (cur->reg[ibyte2] <= 0) { cur->pc+=3*(signed char)ibyte3; }
-							   else { cur->pc+=3; }
-							   break;
-						   }
-				case 0x13: {   // BREZ
-							   if (cur->reg[ibyte2] == 0) { cur->pc+=3*(signed char)ibyte3; }
-							   else { cur->pc+=3; }
-							   break;
-						   }
-				case 0x14: {   // BRA
-							   cur->pc+=3*(signed char)ibyte3;
-							   break;
-						   }
-				case 0x15: {   // DOWN
-							   globalMem[ibyte3]--;
-							   if (globalMem[ibyte3] < 0) {
-								   cur->state = BLOCKED;
-								   cur->sem = ibyte3;
-								   cur_copy = cur;
-							   }
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x16: {   // UP
-							   globalMem[ibyte3]++;
-							   if (globalMem[ibyte3] <= 0) {
-								   blc_node = list_locate_blocked(ibyte3);
-								   blc_node->state = READY;
-								   blc_node->sem = -1;
-								   list_move_to(blc_node, D_RDY);
-							   }
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x17: {   // YIELD
-							   cur->pc +=3;
-							   break;
-						   }
-				case 0x18: {   // SLEEP
-							   cur->state = SLEEPING;
-							   cur->waket = time(NULL) + cur->reg[ibyte2];
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x19: {   // PRINT
-							   printf("%d: %s\n", cur->id, &globalMem[ibyte3]);
-							   cur->pc += 3;
-							   break;
-						   }
-				case 0x1A: {   // EXIT
-							   cur->state = STOPPED;
-							   cur_copy = cur;
-							   tasks_stopped++;
-							   break;
-						   }
-				default: {
-							 printf("Error: Unknown instruction id\n");
-							 exit(1);
-						 }
+			if ((cur->state==SLEEPING)&&(time(NULL) < cur->waket)) { continue;}
+			if ((cur->state==SLEEPING)&&(time(NULL) >= cur->waket)) {
+				cur->waket=-1;
+				cur->state = READY;
 			}
-			if ((ibyte1 == 0x17) || (cur->state == STOPPED) || (cur->state == BLOCKED)) {break;}
-			i++;
+
+			i = 0;
+			inum = rand()%2+1;
+			while (i<inum) {
+				ibyte1 = code[cur->pc];
+				ibyte2 = code[cur->pc+1];
+				ibyte3 = code[cur->pc+2];
+
+	#ifdef DEBUG
+				printf("->Core(%d):\tdbg%d: %02x %02x %02x (pc:%d)\n\n", core, cur->id, ibyte1&0xff, ibyte2&0xff, ibyte3&0xff, cur->pc/3);
+	#endif
+
+				/*sleep(2);*/
+				switch (ibyte1) {
+					case 0x01: {   // LLOAD
+								cur->reg[ibyte2] = cur->local_mem[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x02: {   // LLOADi
+								cur->reg[ibyte2] = cur->local_mem[ibyte3 + cur->reg[0]];
+								cur->pc += 3;
+								break;
+							}
+					case 0x03: {   // GLOAD
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								cur->reg[ibyte2] = globalMem[ibyte3];
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x04: {   // GLOADi
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								cur->reg[ibyte2] = globalMem[ibyte3 + cur->reg[0]];
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x05: {   // LSTORE
+								cur->local_mem[ibyte3] = cur->reg[ibyte2];
+								cur->pc += 3;
+								break;
+							}
+					case 0x06: {   // LSTOREi
+								cur->local_mem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
+								cur->pc += 3;
+								break;
+							}
+					case 0x07: {   // GSTORE
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								globalMem[ibyte3] = cur->reg[ibyte2];
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x08: {   // GSTOREi
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								globalMem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x09: {   // SET
+								cur->reg[ibyte2] = (signed char)ibyte3;
+								cur->pc += 3;
+								break;
+							}
+					case 0x0a: {   // ADD
+								cur->reg[ibyte2] = cur->reg[ibyte2] + cur->reg[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x0b: {   // SUB
+								cur->reg[ibyte2] = cur->reg[ibyte2] - cur->reg[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x0c: {   // MUL
+								cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x0d: {   // DIV
+								cur->reg[ibyte2] = cur->reg[ibyte2] / cur->reg[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x0e: {   // MOD
+								cur->reg[ibyte2] = cur->reg[ibyte2] % cur->reg[ibyte3];
+								cur->pc += 3;
+								break;
+							}
+					case 0x0f: {   // BRGZ
+								if (cur->reg[ibyte2] > 0) { cur->pc+=3*(signed char)ibyte3; }
+								else { cur->pc+=3; }
+								break;
+							}
+					case 0x10: {   // BRGEZ
+								if (cur->reg[ibyte2] >= 0) { cur->pc+=3*(signed char)ibyte3; }
+								else { cur->pc+=3; }
+								break;
+							}
+					case 0x11: {   // BRLZ
+								if (cur->reg[ibyte2] < 0) { cur->pc+=3*(signed char)ibyte3; }
+								else { cur->pc+=3; }
+								break;
+							}
+					case 0x12: {   // BRLEZ
+								if (cur->reg[ibyte2] <= 0) { cur->pc+=3*(signed char)ibyte3; }
+								else { cur->pc+=3; }
+								break;
+							}
+					case 0x13: {   // BREZ
+								if (cur->reg[ibyte2] == 0) { cur->pc+=3*(signed char)ibyte3; }
+								else { cur->pc+=3; }
+								break;
+							}
+					case 0x14: {   // BRA
+								cur->pc+=3*(signed char)ibyte3;
+								break;
+							}
+					case 0x15: {   // DOWN
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								globalMem[ibyte3]--;
+								if (globalMem[ibyte3] < 0) {
+									cur->state = BLOCKED;
+									cur->sem = ibyte3;
+									cur_copy = cur;
+								}
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x16: {   // UP
+								if (pthread_mutex_lock(&cs_mtx)) {
+									perror("pthread_mutex_lock");
+									exit(1);
+								}
+								globalMem[ibyte3]++;
+								if (globalMem[ibyte3] <= 0) {
+									blc_node = list_locate_blocked(ibyte3);
+									blc_node->state = READY;
+									blc_node->sem = -1;
+									list_move_to(blc_node, D_RDY);
+								}
+								if (pthread_mutex_unlock(&cs_mtx)) {
+									perror("pthread_mutex_unlock");
+									exit(1);
+								}
+								cur->pc += 3;
+								break;
+							}
+					case 0x17: {   // YIELD
+								cur->pc +=3;
+								break;
+							}
+					case 0x18: {   // SLEEP
+								cur->state = SLEEPING;
+								cur->waket = time(NULL) + cur->reg[ibyte2];
+								cur->pc += 3;
+								break;
+							}
+					case 0x19: {   // PRINT
+								printf("%d: %s\n", cur->id, &globalMem[ibyte3]);
+								cur->pc += 3;
+								break;
+							}
+					case 0x1A: {   // EXIT
+								cur->state = STOPPED;
+								cur_copy = cur;
+								tasks_stopped++;
+								break;
+							}
+					default: {
+								printf("Error: Unknown instruction id\n");
+								exit(1);
+							}
+				}
+				if ((ibyte1 == 0x17) || (cur->state == STOPPED) || (cur->state == BLOCKED)) {break;}
+				i++;
+			}
 		}
 	}
 }
@@ -729,7 +817,11 @@ void prepare_cores (int tasks){
 			exit (1);
 		}
 		
+		number_of_cores = tasks;
+		
 		for (i = 0; i < tasks; i++){
+			number_of_tasks[i] = 0;
+			
 			temp = (struct tasks **) malloc(1 * sizeof(struct tasks*));
 			if (temp == NULL){
 				perror("NULL");
@@ -745,7 +837,11 @@ void prepare_cores (int tasks){
 			exit (1);
 		}
 		
+		number_of_cores = CORES;
+		
 		for (i = 0; i < CORES; i++){
+			number_of_tasks[i] = 0;
+			
 			temp = (struct tasks **) malloc(((tasks / CORES) + 1) * sizeof(struct tasks*));
 			if (temp == NULL){
 				perror("NULL");
@@ -757,9 +853,9 @@ void prepare_cores (int tasks){
 	
 #ifdef DEBUG
 	if (tasks < CORES)
-		printf("Cores Used: %d of %d\n\n", tasks, CORES);
+		printf("\t->Cores Used: %d of %d\n\n", tasks, CORES);
 	else
-		printf("Cores Used: %d of %d\n\n", CORES, CORES);
+		printf("\t->Cores Used: %d of %d\n\n", CORES, CORES);
 #endif
 }
 
