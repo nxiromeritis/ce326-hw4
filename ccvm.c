@@ -550,20 +550,21 @@ void *run_core(void *arg) {
 	unsigned char ibyte2;
 	unsigned char ibyte3;
 	struct tasks *blc_node;
-	struct tasks *cur_copy;
+	struct tasks *curr_copy;
+	struct tasks *curr;
 
 	printf("\nCore(%d): Start of execution:\n", core);
 
-	cur_copy = NULL;
-	cur=rdy_root;
+	curr_copy = NULL;
+	curr=rdy_root;
 	srand(time(NULL));
 
 	while(1) {
 		for (j = 0; j < num_of_tasks; j++){
 
-			cur=tasks_of_cores[core][j];
+			curr=tasks_of_cores[core][j];
 
-			if (cur == NULL){
+			if (curr == NULL){
 				tasks_stopped++;
 				if (tasks_stopped == num_of_tasks){
 					printf("Core(%d): All tasks STOPPED (successfuly).\n", core);
@@ -575,44 +576,44 @@ void *run_core(void *arg) {
 			
 	#ifdef DEBUG
 			print_lists();
-			printf("->Core(%d):\tdbg: switch to id: %d\n", core, cur->id);
+			printf("->Core(%d):\tdbg: switch to id: %d\n", core, curr->id);
 			/*printf("stopped(%d) vs numoftasks(%d)\n", tasks_stopped, num_of_tasks);*/
 	#endif
 
 
-			if (cur_copy != NULL) {
-				if (cur_copy->state == STOPPED) {list_delete(cur_copy, core, j);}
-				if (cur_copy->state == BLOCKED) {list_move_to(cur_copy, D_BLC);}
-				cur_copy = NULL;
+			if (curr_copy != NULL) {
+				if (curr_copy->state == STOPPED) {list_delete(curr_copy, core, j);}
+				if (curr_copy->state == BLOCKED) {list_move_to(curr_copy, D_BLC);}
+				curr_copy = NULL;
 			}
 
-			if ((cur->state==SLEEPING)&&(time(NULL) < cur->waket)) { continue;}
-			if ((cur->state==SLEEPING)&&(time(NULL) >= cur->waket)) {
-				cur->waket=-1;
-				cur->state = READY;
+			if ((curr->state==SLEEPING)&&(time(NULL) < curr->waket)) { continue;}
+			if ((curr->state==SLEEPING)&&(time(NULL) >= curr->waket)) {
+				curr->waket=-1;
+				curr->state = READY;
 			}
 
 			i = 0;
 			inum = rand()%2+1;
 			while (i<inum) {
-				ibyte1 = code[cur->pc];
-				ibyte2 = code[cur->pc+1];
-				ibyte3 = code[cur->pc+2];
+				ibyte1 = code[curr->pc];
+				ibyte2 = code[curr->pc+1];
+				ibyte3 = code[curr->pc+2];
 
 	#ifdef DEBUG
-				printf("->Core(%d):\tdbg%d: %02x %02x %02x (pc:%d)\n\n", core, cur->id, ibyte1&0xff, ibyte2&0xff, ibyte3&0xff, cur->pc/3);
+				printf("->Core(%d):\tdbg%d: %02x %02x %02x (pc:%d)\n\n", core, curr->id, ibyte1&0xff, ibyte2&0xff, ibyte3&0xff, curr->pc/3);
 	#endif
 
 				/*sleep(2);*/
 				switch (ibyte1) {
 					case 0x01: {   // LLOAD
-								cur->reg[ibyte2] = cur->local_mem[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->local_mem[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x02: {   // LLOADi
-								cur->reg[ibyte2] = cur->local_mem[ibyte3 + cur->reg[0]];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->local_mem[ibyte3 + curr->reg[0]];
+								curr->pc += 3;
 								break;
 							}
 					case 0x03: {   // GLOAD
@@ -620,12 +621,12 @@ void *run_core(void *arg) {
 									perror("pthread_mutex_lock");
 									exit(1);
 								}
-								cur->reg[ibyte2] = globalMem[ibyte3];
+								curr->reg[ibyte2] = globalMem[ibyte3];
 								if (pthread_mutex_unlock(&cs_mtx)) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x04: {   // GLOADi
@@ -633,22 +634,22 @@ void *run_core(void *arg) {
 									perror("pthread_mutex_lock");
 									exit(1);
 								}
-								cur->reg[ibyte2] = globalMem[ibyte3 + cur->reg[0]];
+								curr->reg[ibyte2] = globalMem[ibyte3 + curr->reg[0]];
 								if (pthread_mutex_unlock(&cs_mtx)) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x05: {   // LSTORE
-								cur->local_mem[ibyte3] = cur->reg[ibyte2];
-								cur->pc += 3;
+								curr->local_mem[ibyte3] = curr->reg[ibyte2];
+								curr->pc += 3;
 								break;
 							}
 					case 0x06: {   // LSTOREi
-								cur->local_mem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
-								cur->pc += 3;
+								curr->local_mem[ibyte3 + curr->reg[0]] = curr->reg[ibyte2];
+								curr->pc += 3;
 								break;
 							}
 					case 0x07: {   // GSTORE
@@ -656,12 +657,12 @@ void *run_core(void *arg) {
 									perror("pthread_mutex_lock");
 									exit(1);
 								}
-								globalMem[ibyte3] = cur->reg[ibyte2];
+								globalMem[ibyte3] = curr->reg[ibyte2];
 								if (pthread_mutex_unlock(&cs_mtx)) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x08: {   // GSTOREi
@@ -669,71 +670,71 @@ void *run_core(void *arg) {
 									perror("pthread_mutex_lock");
 									exit(1);
 								}
-								globalMem[ibyte3 + cur->reg[0]] = cur->reg[ibyte2];
+								globalMem[ibyte3 + curr->reg[0]] = curr->reg[ibyte2];
 								if (pthread_mutex_unlock(&cs_mtx)) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x09: {   // SET
-								cur->reg[ibyte2] = (signed char)ibyte3;
-								cur->pc += 3;
+								curr->reg[ibyte2] = (signed char)ibyte3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x0a: {   // ADD
-								cur->reg[ibyte2] = cur->reg[ibyte2] + cur->reg[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->reg[ibyte2] + curr->reg[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x0b: {   // SUB
-								cur->reg[ibyte2] = cur->reg[ibyte2] - cur->reg[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->reg[ibyte2] - curr->reg[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x0c: {   // MUL
-								cur->reg[ibyte2] = cur->reg[ibyte2] * cur->reg[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->reg[ibyte2] * curr->reg[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x0d: {   // DIV
-								cur->reg[ibyte2] = cur->reg[ibyte2] / cur->reg[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->reg[ibyte2] / curr->reg[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x0e: {   // MOD
-								cur->reg[ibyte2] = cur->reg[ibyte2] % cur->reg[ibyte3];
-								cur->pc += 3;
+								curr->reg[ibyte2] = curr->reg[ibyte2] % curr->reg[ibyte3];
+								curr->pc += 3;
 								break;
 							}
 					case 0x0f: {   // BRGZ
-								if (cur->reg[ibyte2] > 0) { cur->pc+=3*(signed char)ibyte3; }
-								else { cur->pc+=3; }
+								if (curr->reg[ibyte2] > 0) { curr->pc+=3*(signed char)ibyte3; }
+								else { curr->pc+=3; }
 								break;
 							}
 					case 0x10: {   // BRGEZ
-								if (cur->reg[ibyte2] >= 0) { cur->pc+=3*(signed char)ibyte3; }
-								else { cur->pc+=3; }
+								if (curr->reg[ibyte2] >= 0) { curr->pc+=3*(signed char)ibyte3; }
+								else { curr->pc+=3; }
 								break;
 							}
 					case 0x11: {   // BRLZ
-								if (cur->reg[ibyte2] < 0) { cur->pc+=3*(signed char)ibyte3; }
-								else { cur->pc+=3; }
+								if (curr->reg[ibyte2] < 0) { curr->pc+=3*(signed char)ibyte3; }
+								else { curr->pc+=3; }
 								break;
 							}
 					case 0x12: {   // BRLEZ
-								if (cur->reg[ibyte2] <= 0) { cur->pc+=3*(signed char)ibyte3; }
-								else { cur->pc+=3; }
+								if (curr->reg[ibyte2] <= 0) { curr->pc+=3*(signed char)ibyte3; }
+								else { curr->pc+=3; }
 								break;
 							}
 					case 0x13: {   // BREZ
-								if (cur->reg[ibyte2] == 0) { cur->pc+=3*(signed char)ibyte3; }
-								else { cur->pc+=3; }
+								if (curr->reg[ibyte2] == 0) { curr->pc+=3*(signed char)ibyte3; }
+								else { curr->pc+=3; }
 								break;
 							}
 					case 0x14: {   // BRA
-								cur->pc+=3*(signed char)ibyte3;
+								curr->pc+=3*(signed char)ibyte3;
 								break;
 							}
 					case 0x15: {   // DOWN
@@ -743,15 +744,15 @@ void *run_core(void *arg) {
 								}
 								globalMem[ibyte3]--;
 								if (globalMem[ibyte3] < 0) {
-									cur->state = BLOCKED;
-									cur->sem = ibyte3;
-									cur_copy = cur;
+									curr->state = BLOCKED;
+									curr->sem = ibyte3;
+									curr_copy = curr;
 								}
 								if (pthread_mutex_unlock(&cs_mtx)) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x16: {   // UP
@@ -770,27 +771,27 @@ void *run_core(void *arg) {
 									perror("pthread_mutex_unlock");
 									exit(1);
 								}
-								cur->pc += 3;
+								curr->pc += 3;
 								break;
 							}
 					case 0x17: {   // YIELD
-								cur->pc +=3;
+								curr->pc +=3;
 								break;
 							}
 					case 0x18: {   // SLEEP
-								cur->state = SLEEPING;
-								cur->waket = time(NULL) + cur->reg[ibyte2];
-								cur->pc += 3;
+								curr->state = SLEEPING;
+								curr->waket = time(NULL) + curr->reg[ibyte2];
+								curr->pc += 3;
 								break;
 							}
 					case 0x19: {   // PRINT
-								printf("%d: %s\n", cur->id, &globalMem[ibyte3]);
-								cur->pc += 3;
+								printf("%d: %s\n", curr->id, &globalMem[ibyte3]);
+								curr->pc += 3;
 								break;
 							}
 					case 0x1A: {   // EXIT
-								cur->state = STOPPED;
-								cur_copy = cur;
+								curr->state = STOPPED;
+								curr_copy = curr;
 								tasks_stopped++;
 								break;
 							}
@@ -799,7 +800,7 @@ void *run_core(void *arg) {
 								exit(1);
 							}
 				}
-				if ((ibyte1 == 0x17) || (cur->state == STOPPED) || (cur->state == BLOCKED)) {break;}
+				if ((ibyte1 == 0x17) || (curr->state == STOPPED) || (curr->state == BLOCKED)) {break;}
 				i++;
 			}
 		}
